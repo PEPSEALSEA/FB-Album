@@ -1,4 +1,4 @@
-# 🎯 FB - Album
+# FB - Album
 
 ## ⚠️ Important Notice
 
