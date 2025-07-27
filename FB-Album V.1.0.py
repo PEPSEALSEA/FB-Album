@@ -22,6 +22,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import time
 import random
 from urllib.parse import urljoin, urlparse, parse_qs
+import webbrowser
 
 class FacebookAlbumScraper:
     def __init__(self, headless=False, progress_callback=None, log_callback=None, speed="Medium"):
@@ -518,7 +519,6 @@ class FacebookAlbumScraper:
             self.log(f"Download completed. Saved {successful_downloads} media items")
             self.update_progress(100, 100, "Download completed!")
             return successful_downloads > 0
-            
         except Exception as e:
             self.log(f"Error during download from JSON: {e}", "ERROR")
             return False
@@ -688,7 +688,6 @@ class AnimatedProgressBar(tk.Frame):
                 self.progress = target
                 self.update_display()
                 return
-            
             self.progress += diff * 0.1
             self.update_display()
             self.animation_id = self.after(16, animate_step)
@@ -716,13 +715,12 @@ class AnimatedProgressBar(tk.Frame):
                 g = int(20 * (1 - ratio) + 105 * ratio)
                 b = int(147 * (1 - ratio) + 180 * ratio)
                 color = f"#{r:02x}{g:02x}{b:02x}"
-                
                 self.canvas.create_line(2 + i, 2, 2 + i, height-2, fill=color, width=1)
 
 class FacebookScraperGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Facebook Album Scraper - Modern Edition")
+        self.root.title("FB Album Scraper - Modern Edition")
         self.root.geometry("900x600")
         self.root.configure(bg='#0a0a0a')
         self.root.resizable(True, True)
@@ -841,16 +839,21 @@ class FacebookScraperGUI:
         header_frame = tk.Frame(parent, bg='#0a0a0a')
         header_frame.pack(fill='x', pady=(0, 10))
         
+        # Header row with website button and title
+        header_row = tk.Frame(header_frame, bg='#0a0a0a')
+        header_row.pack(fill='x')
+        
+        # Website button
+        self.website_button = ModernButton(header_row, text="🌐", 
+                                         command=lambda: webbrowser.open("https://pepsealsea.github.io/JSON-Array-Editor/"),
+                                         bg_color="#4169E1", hover_color="#5A9BD4", width=40)
+        self.website_button.pack(side='left', padx=(0, 5))
+        
         # Animated title
-        self.title_label = tk.Label(header_frame, text="FACEBOOK ALBUM SCRAPER", 
+        self.title_label = tk.Label(header_row, text="FB ALBUM SCRAPER", 
                                    bg='#0a0a0a', fg='#FF1493', 
                                    font=('Segoe UI', 18, 'bold'), cursor='hand2')
-        self.title_label.pack()
-        
-        subtitle = tk.Label(header_frame, text="Modern Edition - Extract with Style", 
-                           bg='#0a0a0a', fg='#FF69B4', 
-                           font=('Segoe UI', 10, 'italic'))
-        subtitle.pack(pady=(2, 0))
+        self.title_label.pack(side='left')
         
         # Animated underline
         self.underline_canvas = tk.Canvas(header_frame, height=2, bg='#0a0a0a', highlightthickness=0)
@@ -1288,6 +1291,7 @@ class FacebookScraperGUI:
             self.download_button.config_state("disabled")
             self.stop_button.config_state("normal")
             self.clear_button.config_state("disabled")
+            self.website_button.config_state("disabled")
         else:
             self.start_button.config_state("normal")
             self.grab_button.config_state("normal")
@@ -1295,6 +1299,7 @@ class FacebookScraperGUI:
             self.download_button.config_state("normal")
             self.stop_button.config_state("disabled")
             self.clear_button.config_state("normal")
+            self.website_button.config_state("normal")
             self.progress_var.set("Ready for next mission...")
     
     def run_scraping(self, max_media):
