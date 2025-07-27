@@ -1,8 +1,8 @@
 """
-Facebook Album Scraper - Modern GUI Version with Black/Pink Theme (Updated for 2025)
-WARNING: This script is for educational purposes only.
-Please ensure you comply with Facebook's Terms of Service and applicable laws.
-Consider using Facebook's official API for legitimate use cases.
+Facebook Album Scraper - Multi-Album with Auto Media Count (V1.2)
+WARNING: For educational purposes only.
+Ensure compliance with Facebook's Terms of Service and applicable laws.
+Use Facebook's official API for legitimate use cases.
 """
 
 import tkinter as tk
@@ -11,6 +11,7 @@ import threading
 import os
 import requests
 import json
+import re
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -23,14 +24,16 @@ import time
 import random
 from urllib.parse import urljoin, urlparse, parse_qs
 import webbrowser
+import datetime
 
 class FacebookAlbumScraper:
-    def __init__(self, headless=False, progress_callback=None, log_callback=None, speed="Medium"):
+    def __init__(self, headless=False, progress_callback=None, log_callback=None, speed="Medium", combined_log_callback=None):
         self.driver = None
         self.wait = None
         self.headless = headless
         self.progress_callback = progress_callback
         self.log_callback = log_callback
+        self.combined_log_callback = combined_log_callback
         self.stop_requested = False
         self.speed = speed
         self.delay_map = {
@@ -40,8 +43,12 @@ class FacebookAlbumScraper:
         }
         
     def log(self, message, level="INFO"):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        formatted_message = f"[{timestamp}] [{level}] {message}"
         if self.log_callback:
-            self.log_callback(f"[{level}] {message}")
+            self.log_callback(formatted_message, level)
+        if self.combined_log_callback:
+            self.combined_log_callback(formatted_message, level)
         
     def update_progress(self, current, total, message=""):
         if self.progress_callback:
@@ -189,6 +196,23 @@ class FacebookAlbumScraper:
         self.log(f"Could not find album title, using: {fallback_title}", "WARNING")
         return fallback_title
 
+    def get_media_count(self):
+        try:
+            scripts = self.driver.find_elements(By.TAG_NAME, 'script')
+            for script in scripts:
+                script_content = script.get_attribute('innerHTML')
+                if script_content and '"media":{"count":' in script_content:
+                    match = re.search(r'"media":{"count":(\d+)}', script_content)
+                    if match:
+                        count = int(match.group(1))
+                        self.log(f"Detected media count: {count}")
+                        return count
+            self.log("Could not find media count in page data, using default: 5000", "WARNING")
+            return 5000
+        except Exception as e:
+            self.log(f"Error detecting media count: {e}, using default: 5000", "WARNING")
+            return 5000
+
     def get_media_url(self):
         try:
             current_url = self.driver.current_url
@@ -254,7 +278,7 @@ class FacebookAlbumScraper:
             self.log(f"Failed to navigate to media URL: {e}", "ERROR")
             return False
 
-    def collect_media_urls(self, album_url, max_media=2000, url_file_path=None, resume_url=None):
+    def collect_media_urls(self, album_url, max_media=5000, url_file_path=None, resume_url=None):
         media_urls = self.load_urls_from_file(url_file_path) if url_file_path else []
         current_media = len(media_urls)
         album_id = parse_qs(urlparse(album_url).query).get('set', [''])[0]
@@ -374,7 +398,7 @@ class FacebookAlbumScraper:
             last_file = i
         return last_file
 
-    def download_media(self, media_urls, main_folder, album_folder, max_media=2000):
+    def download_media(self, media_urls, main_folder, album_folder, max_media=5000):
         resume_index = self.find_resume_index(media_urls, main_folder, album_folder)
         if resume_index > 0:
             self.log(f"Resuming from media {resume_index + 1}/{len(media_urls)}")
@@ -416,7 +440,7 @@ class FacebookAlbumScraper:
         self.update_progress(total_media, total_media, "Download completed")
         return successful_downloads
 
-    def grab_links_only(self, album_url, main_folder, album_title, max_media=2000):
+    def grab_links_only(self, album_url, main_folder, album_title, max_media=5000):
         try:
             self.log(f"Starting to grab links for album: {album_url}")
             self.update_progress(0, 100, "Initializing browser...")
@@ -437,6 +461,8 @@ class FacebookAlbumScraper:
                 self.log("Still on login or verification page after timeout.", "ERROR")
                 return False
             
+            max_media = self.get_media_count()
+            
             folder_path = self.create_folder(main_folder, album_title)
             url_file_path = os.path.normpath(os.path.join(folder_path, "media_urls.json"))
             
@@ -456,7 +482,7 @@ class FacebookAlbumScraper:
         finally:
             self.close()
 
-    def resume_grab_links(self, album_url, json_file_path, max_media=2000):
+    def resume_grab_links(self, album_url, json_file_path, max_media=5000):
         try:
             self.log(f"Resuming link grabbing for album: {album_url}")
             self.update_progress(0, 100, "Initializing browser...")
@@ -477,13 +503,15 @@ class FacebookAlbumScraper:
                 self.log("Still on login or verification page after timeout.", "ERROR")
                 return False
             
+            max_media = self.get_media_count()
+            
             media_urls = self.load_urls_from_file(json_file_path)
             
             if not media_urls:
                 self.log("No URLs found in JSON file to resume from", "ERROR")
                 return False
             
-            last_url = media_urls[-1][2]  # Get the last original URL
+            last_url = media_urls[-1][2]
             self.update_progress(30, 100, "Resuming media URL collection...")
             media_urls = self.collect_media_urls(album_url, max_media, json_file_path, resume_url=last_url)
             if media_urls:
@@ -500,14 +528,13 @@ class FacebookAlbumScraper:
         finally:
             self.close()
 
-    def download_from_json(self, json_file_path, main_folder, max_media=2000):
+    def download_from_json(self, json_file_path, main_folder, max_media=5000):
         try:
             media_urls = self.load_urls_from_file(json_file_path)
             if not media_urls:
                 self.log("No URLs found in JSON file", "ERROR")
                 return False
             
-            # Extract album_title from the JSON file's parent directory
             album_title = os.path.basename(os.path.dirname(json_file_path))
             if not album_title:
                 album_title = self.remove_invalid_characters(f"Album_{int(time.time())}")
@@ -536,7 +563,7 @@ class FacebookAlbumScraper:
                 self.log(f"Error closing browser: {e}", "ERROR")
             self.driver = None
 
-    def scrape_album(self, album_url, main_folder="downloaded_albums", max_media=2000):
+    def scrape_album(self, album_url, main_folder="downloaded_albums", max_media=5000):
         try:
             self.log(f"Starting scrape of album: {album_url}")
             self.update_progress(0, 100, "Initializing browser...")
@@ -560,6 +587,7 @@ class FacebookAlbumScraper:
             self.update_progress(20, 100, "Extracting album information...")
             album_title = self.get_album_title()
             album_title = self.remove_invalid_characters(album_title)
+            max_media = self.get_media_count()
             
             folder_path = self.create_folder(main_folder, album_title)
             url_file_path = os.path.normpath(os.path.join(folder_path, "media_urls.json"))
@@ -622,7 +650,6 @@ class ModernButton(tk.Frame):
         if self.animation_id:
             self.after_cancel(self.animation_id)
         
-        # Simple color animation
         steps = 10
         start_rgb = self._hex_to_rgb(start_color)
         end_rgb = self._hex_to_rgb(end_color)
@@ -702,13 +729,10 @@ class AnimatedProgressBar(tk.Frame):
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         
-        # Background
         self.canvas.create_rectangle(2, 2, width-2, height-2, fill='#333333', outline='#555555')
         
-        # Progress fill with gradient effect
         progress_width = (width - 4) * (self.progress / 100)
         if progress_width > 0:
-            # Create gradient effect
             for i in range(int(progress_width)):
                 ratio = i / max(1, progress_width)
                 r = int(255 * (1 - ratio) + 255 * ratio)
@@ -720,19 +744,18 @@ class AnimatedProgressBar(tk.Frame):
 class FacebookScraperGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("FB Album Scraper - Modern Edition")
-        self.root.geometry("900x600")
+        self.root.title("FB Album Scraper - Multi-Album Auto Count Edition")
+        self.root.geometry("900x700")
         self.root.configure(bg='#0a0a0a')
         self.root.resizable(True, True)
         
-        # Configure modern style
         self.setup_styles()
         
         self.scraper = None
         self.scraping_thread = None
         self.is_scraping = False
+        self.album_logs = {}
         
-        # Show warning popup before main GUI
         self.show_warning_popup()
         
         self.setup_gui()
@@ -742,7 +765,6 @@ class FacebookScraperGUI:
         style = ttk.Style()
         style.theme_use('clam')
         
-        # Configure custom styles
         style.configure('Modern.TFrame', background='#1a1a1a', relief='flat')
         style.configure('Modern.TLabel', background='#1a1a1a', foreground='#ffffff', font=('Segoe UI', 10))
         style.configure('Modern.TEntry', fieldbackground='#2a2a2a', bordercolor='#FF1493', 
@@ -752,7 +774,6 @@ class FacebookScraperGUI:
         style.configure('Modern.TCheckbutton', background='#1a1a1a', foreground='#ffffff',
                        focuscolor='#FF1493', font=('Segoe UI', 10))
         
-        # Map hover effects
         style.map('Modern.TEntry', focuscolor=[('!focus', '#FF1493')])
         style.map('Modern.TCombobox', focuscolor=[('!focus', '#FF1493')])
         
@@ -765,7 +786,6 @@ class FacebookScraperGUI:
         warning_window.transient(self.root)
         warning_window.grab_set()
         
-        # Center the warning window
         warning_window.update_idletasks()
         x = (self.root.winfo_screenwidth() // 2) - (400 // 2)
         y = (self.root.winfo_screenheight() // 2) - (250 // 2)
@@ -804,58 +824,41 @@ class FacebookScraperGUI:
                                   bg_color="#FF1493", hover_color="#FF69B4")
         accept_button.pack(pady=5)
         
-        # Prevent main window interaction until warning is dismissed
         self.root.wait_window(warning_window)
     
     def setup_gui(self):
-        # Main container with paned window for resizable columns
         self.paned_window = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg='#0a0a0a', sashwidth=5, sashrelief='raised')
         self.paned_window.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Left column for header, settings, buttons, and progress
         left_column = tk.Frame(self.paned_window, bg='#0a0a0a', width=400)
         self.paned_window.add(left_column, minsize=300, width=400)
         
-        # Right column for log
         right_column = tk.Frame(self.paned_window, bg='#0a0a0a')
         self.paned_window.add(right_column, minsize=300)
         
-        # Header
         self.setup_header(left_column)
-        
-        # Settings section
         self.setup_settings(left_column)
-        
-        # Action buttons
         self.setup_buttons(left_column)
-        
-        # Progress section
         self.setup_progress(left_column)
-        
-        # Log section
         self.setup_log(right_column)
     
     def setup_header(self, parent):
         header_frame = tk.Frame(parent, bg='#0a0a0a')
         header_frame.pack(fill='x', pady=(0, 10))
         
-        # Header row with website button and title
         header_row = tk.Frame(header_frame, bg='#0a0a0a')
         header_row.pack(fill='x')
         
-        # Website button
         self.website_button = ModernButton(header_row, text="🌐", 
                                          command=lambda: webbrowser.open("https://pepsealsea.github.io/JSON-Array-Editor/"),
                                          bg_color="#4169E1", hover_color="#5A9BD4", width=40)
         self.website_button.pack(side='left', padx=(0, 5))
         
-        # Animated title
         self.title_label = tk.Label(header_row, text="FB ALBUM SCRAPER", 
                                    bg='#0a0a0a', fg='#FF1493', 
                                    font=('Segoe UI', 18, 'bold'), cursor='hand2')
         self.title_label.pack(side='left')
         
-        # Animated underline
         self.underline_canvas = tk.Canvas(header_frame, height=2, bg='#0a0a0a', highlightthickness=0)
         self.underline_canvas.pack(fill='x', pady=(5, 0))
         
@@ -863,7 +866,6 @@ class FacebookScraperGUI:
         settings_frame = tk.Frame(parent, bg='#1a1a1a', relief='solid', bd=1)
         settings_frame.pack(fill='x', pady=(0, 10))
         
-        # Header
         settings_header = tk.Frame(settings_frame, bg='#FF1493')
         settings_header.pack(fill='x')
         
@@ -872,15 +874,13 @@ class FacebookScraperGUI:
                                 font=('Segoe UI', 10, 'bold'))
         settings_title.pack(pady=5)
         
-        # Content
         settings_content = tk.Frame(settings_frame, bg='#1a1a1a')
         settings_content.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # URL input
         url_frame = tk.Frame(settings_content, bg='#1a1a1a')
         url_frame.pack(fill='x', pady=(0, 8))
         
-        tk.Label(url_frame, text="Facebook Album URL:", 
+        tk.Label(url_frame, text="Facebook Album URLs (comma-separated):", 
                 bg='#1a1a1a', fg='#ffffff', 
                 font=('Segoe UI', 9, 'bold')).pack(anchor='w')
         
@@ -890,7 +890,6 @@ class FacebookScraperGUI:
                            font=('Segoe UI', 9), relief='flat', bd=3)
         url_entry.pack(fill='x', pady=(3, 0), ipady=6)
         
-        # Folder input
         folder_frame = tk.Frame(settings_content, bg='#1a1a1a')
         folder_frame.pack(fill='x', pady=(0, 8))
         
@@ -912,25 +911,9 @@ class FacebookScraperGUI:
                                 bg_color="#FF1493", hover_color="#FF69B4")
         browse_btn.pack(side='right', padx=(5, 0))
         
-        # Settings row
         settings_row = tk.Frame(settings_content, bg='#1a1a1a')
         settings_row.pack(fill='x', pady=(0, 8))
         
-        # Media count
-        count_frame = tk.Frame(settings_row, bg='#1a1a1a')
-        count_frame.pack(side='left', fill='x', expand=True, padx=(0, 10))
-        
-        tk.Label(count_frame, text="Media Items:", 
-                bg='#1a1a1a', fg='#ffffff', 
-                font=('Segoe UI', 9, 'bold')).pack(anchor='w')
-        
-        self.media_count_var = tk.StringVar(value="2000")
-        count_entry = tk.Entry(count_frame, textvariable=self.media_count_var,
-                             bg='#2a2a2a', fg='#ffffff', insertbackground='#FF1493',
-                             font=('Segoe UI', 9), relief='flat', bd=3, width=10)
-        count_entry.pack(anchor='w', pady=(3, 0), ipady=6)
-        
-        # Speed
         speed_frame = tk.Frame(settings_row, bg='#1a1a1a')
         speed_frame.pack(side='left', fill='x', expand=True)
         
@@ -950,7 +933,6 @@ class FacebookScraperGUI:
                                font=('Segoe UI', 8), relief='flat')
             btn.pack(side='left', padx=(0, 10))
         
-        # Options
         options_frame = tk.Frame(settings_content, bg='#1a1a1a')
         options_frame.pack(fill='x')
         
@@ -965,7 +947,6 @@ class FacebookScraperGUI:
         button_frame = tk.Frame(parent, bg='#0a0a0a')
         button_frame.pack(fill='x', pady=(0, 10))
         
-        # First row of buttons
         button_row1 = tk.Frame(button_frame, bg='#0a0a0a')
         button_row1.pack(fill='x')
         
@@ -984,7 +965,6 @@ class FacebookScraperGUI:
                                         bg_color="#FF6347", hover_color="#FF7F50")
         self.resume_button.pack(side='left', padx=(0, 5), pady=(0, 5), fill='y')
         
-        # Second row of buttons
         button_row2 = tk.Frame(button_frame, bg='#0a0a0a')
         button_row2.pack(fill='x')
         
@@ -1008,27 +988,28 @@ class FacebookScraperGUI:
         log_frame = tk.Frame(parent, bg='#1a1a1a', relief='solid', bd=1)
         log_frame.pack(fill='both', expand=True, pady=(0, 10))
         
-        # Header
         log_header = tk.Frame(log_frame, bg='#4169E1')
         log_header.pack(fill='x')
         
         log_title = tk.Label(log_header, text="📋 ACTIVITY LOG", 
-                           bg='#4169E1', fg='white', 
-                           font=('Segoe UI', 10, 'bold'))
+                            bg='#4169E1', fg='white', 
+                            font=('Segoe UI', 10, 'bold'))
         log_title.pack(pady=5)
         
-        # Log content
         log_content = tk.Frame(log_frame, bg='#0f0f0f')
         log_content.pack(fill='both', expand=True, padx=1, pady=1)
         
+        self.album_selector = ttk.Combobox(log_content, state='readonly', font=('Segoe UI', 8))
+        self.album_selector.pack(fill='x', padx=5, pady=5)
+        self.album_selector.bind('<<ComboboxSelected>>', self.switch_log)
+        
         self.log_text = scrolledtext.ScrolledText(log_content, height=10, 
                                                 bg='#0f0f0f', fg='#00ff00',
-                                                insertbackground='#FF1493',
                                                 font=('Consolas', 8),
-                                                relief='flat', bd=0)
+                                                relief='flat', bd=0,
+                                                state='disabled')
         self.log_text.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Configure text tags for colored output
         self.log_text.tag_config("INFO", foreground="#00ff00")
         self.log_text.tag_config("WARNING", foreground="#ffaa00")
         self.log_text.tag_config("ERROR", foreground="#ff4444")
@@ -1038,7 +1019,6 @@ class FacebookScraperGUI:
         progress_frame = tk.Frame(parent, bg='#1a1a1a', relief='solid', bd=1)
         progress_frame.pack(fill='x')
         
-        # Header
         progress_header = tk.Frame(progress_frame, bg='#FF1493')
         progress_header.pack(fill='x')
         
@@ -1047,7 +1027,6 @@ class FacebookScraperGUI:
                                 font=('Segoe UI', 10, 'bold'))
         progress_title.pack(pady=5)
         
-        # Progress content
         progress_content = tk.Frame(progress_frame, bg='#1a1a1a')
         progress_content.pack(fill='x', padx=10, pady=10)
         
@@ -1061,12 +1040,10 @@ class FacebookScraperGUI:
         self.progress_bar.pack(fill='x', pady=(5, 0))
         
     def animate_startup(self):
-        # Animate the underline
         def animate_underline():
             width = self.underline_canvas.winfo_width()
             if width > 1:
                 self.underline_canvas.delete('all')
-                # Create animated gradient line
                 for i in range(0, width, 2):
                     ratio = i / width
                     r = int(255 * ratio)
@@ -1077,7 +1054,6 @@ class FacebookScraperGUI:
         
         self.root.after(100, animate_underline)
         
-        # Animate title color
         def animate_title():
             colors = ['#FF1493', '#FF69B4', '#FF1493', '#DA70D6', '#FF1493']
             for i, color in enumerate(colors):
@@ -1098,20 +1074,48 @@ class FacebookScraperGUI:
         )
         return file_path
     
-    def log_message(self, message):
-        # Determine message type and color
-        if "[ERROR]" in message:
-            tag = "ERROR"
-        elif "[WARNING]" in message:
-            tag = "WARNING" 
-        elif "✅" in message or "completed successfully" in message:
-            tag = "SUCCESS"
-        else:
-            tag = "INFO"
-        
-        self.log_text.insert(tk.END, f"{message}\n", tag)
+    def log_message(self, message, level):
+        self.log_text.config(state='normal')
+        self.log_text.insert(tk.END, f"{message}\n", level)
         self.log_text.see(tk.END)
+        self.log_text.config(state='disabled')
         self.root.update_idletasks()
+        
+        album_id = self.current_album_id if hasattr(self, 'current_album_id') else "Combined"
+        if album_id not in self.album_logs:
+            self.album_logs[album_id] = []
+        self.album_logs[album_id].append((message, level))
+        
+        self.album_selector['values'] = list(self.album_logs.keys())
+        if not self.album_selector.get():
+            self.album_selector.set("Combined")
+    
+    def combined_log_message(self, message, level):
+        album_id = self.current_album_id if hasattr(self, 'current_album_id') else "Unknown"
+        combined_message = f"[Album {album_id}] {message}"
+        if "Combined" not in self.album_logs:
+            self.album_logs["Combined"] = []
+        self.album_logs["Combined"].append((combined_message, level))
+        
+        if self.album_selector.get() == "Combined":
+            self.log_text.config(state='normal')
+            self.log_text.insert(tk.END, f"{combined_message}\n", level)
+            self.log_text.see(tk.END)
+            self.log_text.config(state='disabled')
+            self.root.update_idletasks()
+        
+        self.album_selector['values'] = list(self.album_logs.keys())
+        if not self.album_selector.get():
+            self.album_selector.set("Combined")
+    
+    def switch_log(self, event):
+        selected_album = self.album_selector.get()
+        self.log_text.config(state='normal')
+        self.log_text.delete(1.0, tk.END)
+        for message, level in self.album_logs.get(selected_album, []):
+            self.log_text.insert(tk.END, f"{message}\n", level)
+        self.log_text.see(tk.END)
+        self.log_text.config(state='disabled')
     
     def update_progress(self, current, total, message=""):
         if total > 0:
@@ -1126,47 +1130,44 @@ class FacebookScraperGUI:
         self.root.update_idletasks()
     
     def clear_log(self):
+        self.album_logs.clear()
+        self.album_selector['values'] = []
+        self.album_selector.set("")
+        self.log_text.config(state='normal')
         self.log_text.delete(1.0, tk.END)
-        self.log_message("📋 Log cleared - Ready for new session")
+        self.log_message("📋 Log cleared - Ready for new session", "INFO")
     
     def validate_inputs(self, require_url=True):
         url = self.url_var.get().strip()
         folder = self.folder_var.get().strip()
-        media_count = self.media_count_var.get().strip()
         speed = self.speed_var.get().strip()
         
         if require_url and not url:
-            messagebox.showerror("Error", "Please enter a Facebook album URL")
-            return False
-        if require_url and not url.startswith(('http://', 'https://')):
-            messagebox.showerror("Error", "Please enter a valid URL starting with http:// or https://")
-            return False
+            messagebox.showerror("Error", "Please enter at least one Facebook album URL")
+            return False, []
         if not folder:
             messagebox.showerror("Error", "Please specify a download folder")
-            return False
+            return False, []
         if speed not in ["Slow", "Medium", "Fast"]:
             messagebox.showerror("Error", "Please select a valid speed (Slow, Medium, Fast)")
-            return False
-        try:
-            max_media = int(media_count)
-            if max_media <= 0:
-                raise ValueError
-            return max_media
-        except ValueError:
-            messagebox.showerror("Error", "Please enter a valid positive number for media count")
-            return False
+            return False, []
+        urls = [u.strip() for u in url.split(',') if u.strip()]
+        for u in urls:
+            if not u.startswith(('http://', 'https://')):
+                messagebox.showerror("Error", f"Invalid URL: {u}. Must start with http:// or https://")
+                return False, []
+        return True, urls
     
     def start_scraping(self):
-        max_media = self.validate_inputs()
-        if not max_media:
+        success, urls = self.validate_inputs()
+        if not success:
             return
         if self.is_scraping:
             messagebox.showwarning("Warning", "Scraping is already in progress")
             return
         
-        # Custom confirmation dialog
         result = messagebox.askyesno("🚀 Confirm Scraping", 
-                                   "Ready to launch the scraping mission?\n\n"
+                                   f"Ready to scrape {len(urls)} albums?\n\n"
                                    "Please ensure you have permission to download "
                                    "the content and comply with Facebook's Terms of Service.\n\n"
                                    "Let's go! 🎯")
@@ -1174,47 +1175,47 @@ class FacebookScraperGUI:
             return
         
         self.set_scraping_state(True)
-        self.log_message("🚀 Starting scraping mission...")
+        self.log_message("🚀 Starting multi-album scraping mission...", "INFO")
         self.progress_bar.set_progress(0)
         self.progress_var.set("Initializing...")
         
         self.scraping_thread = threading.Thread(
-            target=self.run_scraping, 
-            args=(max_media,), 
+            target=self.run_multi_scraping, 
+            args=(urls,), 
             daemon=True
         )
         self.scraping_thread.start()
     
     def grab_links(self):
-        max_media = self.validate_inputs()
-        if not max_media:
+        success, urls = self.validate_inputs()
+        if not success:
             return
         if self.is_scraping:
             messagebox.showwarning("Warning", "Scraping is already in progress")
             return
         
         result = messagebox.askyesno("🔗 Confirm Link Grabbing", 
-                                   "Ready to grab those links?\n\n"
+                                   f"Ready to grab links for {len(urls)} albums?\n\n"
                                    "This will collect media URLs without downloading.\n"
                                    "Perfect for batch processing later! 📎")
         if not result:
             return
         
         self.set_scraping_state(True)
-        self.log_message("🔗 Starting link collection mission...")
+        self.log_message("🔗 Starting multi-album link collection mission...", "INFO")
         self.progress_bar.set_progress(0)
         self.progress_var.set("Initializing...")
         
         self.scraping_thread = threading.Thread(
-            target=self.run_grab_links, 
-            args=(max_media,), 
+            target=self.run_multi_grab_links, 
+            args=(urls,), 
             daemon=True
         )
         self.scraping_thread.start()
     
     def resume_grab_links(self):
-        max_media = self.validate_inputs()
-        if not max_media:
+        success, urls = self.validate_inputs()
+        if not success:
             return
         if self.is_scraping:
             messagebox.showwarning("Warning", "Scraping is already in progress")
@@ -1233,20 +1234,20 @@ class FacebookScraperGUI:
             return
         
         self.set_scraping_state(True)
-        self.log_message("🔄 Resuming link collection mission...")
+        self.log_message("🔄 Resuming link collection mission...", "INFO")
         self.progress_bar.set_progress(0)
         self.progress_var.set("Initializing...")
         
         self.scraping_thread = threading.Thread(
             target=self.run_resume_grab_links, 
-            args=(max_media, json_file_path), 
+            args=(json_file_path,), 
             daemon=True
         )
         self.scraping_thread.start()
     
     def download_from_json(self):
-        max_media = self.validate_inputs(require_url=False)
-        if not max_media:
+        success, _ = self.validate_inputs(require_url=False)
+        if not success:
             return
         if self.is_scraping:
             messagebox.showwarning("Warning", "Scraping is already in progress")
@@ -1265,13 +1266,13 @@ class FacebookScraperGUI:
             return
         
         self.set_scraping_state(True)
-        self.log_message("📥 Starting download from JSON...")
+        self.log_message("📥 Starting download from JSON...", "INFO")
         self.progress_bar.set_progress(0)
         self.progress_var.set("Initializing...")
         
         self.scraping_thread = threading.Thread(
             target=self.run_download_from_json, 
-            args=(max_media, json_file_path), 
+            args=(json_file_path,), 
             daemon=True
         )
         self.scraping_thread.start()
@@ -1279,7 +1280,7 @@ class FacebookScraperGUI:
     def stop_scraping(self):
         if self.scraper:
             self.scraper.stop_scraping()
-            self.log_message("⏹️ Stop signal sent...")
+            self.log_message("⏹️ Stop signal sent...", "INFO")
     
     def set_scraping_state(self, is_scraping):
         self.is_scraping = is_scraping
@@ -1302,29 +1303,43 @@ class FacebookScraperGUI:
             self.website_button.config_state("normal")
             self.progress_var.set("Ready for next mission...")
     
-    def run_scraping(self, max_media):
+    def run_multi_scraping(self, urls):
         try:
-            self.scraper = FacebookAlbumScraper(
-                headless=self.headless_var.get(),
-                progress_callback=self.update_progress,
-                log_callback=self.log_message,
-                speed=self.speed_var.get()
-            )
-            
-            url = self.url_var.get().strip()
-            folder = self.folder_var.get().strip()
-            
-            success = self.scraper.scrape_album(url, folder, max_media)
-            
-            if success:
-                self.log_message("✅ Mission accomplished! Scraping completed successfully! 🎉")
-                messagebox.showinfo("🎉 Success!", f"Mission completed successfully!\n\nMedia saved to: {folder}\n\nYou're awesome! 🌟")
-            else:
-                self.log_message("❌ Mission failed. Check the logs for details.")
-                messagebox.showerror("💥 Mission Failed", "Something went wrong during scraping.\nCheck the activity log for details.")
+            total_albums = len(urls)
+            for i, url in enumerate(urls, 1):
+                if self.is_scraping == False:
+                    self.log_message("⏹️ Scraping stopped by user", "WARNING")
+                    break
                 
+                self.current_album_id = parse_qs(urlparse(url).query).get('set', [''])[0]
+                self.log_message(f"📔 Starting album {i}/{total_albums}: {url}", "INFO")
+                
+                self.scraper = FacebookAlbumScraper(
+                    headless=self.headless_var.get(),
+                    progress_callback=self.update_progress,
+                    log_callback=self.log_message,
+                    combined_log_callback=self.combined_log_message,
+                    speed=self.speed_var.get()
+                )
+                
+                folder = self.folder_var.get().strip()
+                
+                success = self.scraper.scrape_album(url, folder)
+                
+                if success:
+                    self.log_message(f"✅ Album {i}/{total_albums} completed successfully! 🎉", "SUCCESS")
+                else:
+                    self.log_message(f"❌ Album {i}/{total_albums} failed. Check logs for details.", "ERROR")
+                
+                self.scraper.close()
+                self.scraper = None
+                
+            if self.is_scraping:
+                self.log_message(f"✅ Multi-album scraping completed! Processed {total_albums} albums.", "SUCCESS")
+                messagebox.showinfo("🎉 Success!", f"Multi-album scraping completed!\n\nProcessed {total_albums} albums.\n\nYou're awesome! 🌟")
+        
         except Exception as e:
-            self.log_message(f"💥 Unexpected error: {e}")
+            self.log_message(f"💥 Unexpected error: {e}", "ERROR")
             messagebox.showerror("💥 System Error", f"Unexpected error occurred:\n{e}")
         finally:
             if self.scraper:
@@ -1332,30 +1347,44 @@ class FacebookScraperGUI:
                 self.scraper = None
             self.set_scraping_state(False)
     
-    def run_grab_links(self, max_media):
+    def run_multi_grab_links(self, urls):
         try:
-            self.scraper = FacebookAlbumScraper(
-                headless=self.headless_var.get(),
-                progress_callback=self.update_progress,
-                log_callback=self.log_message,
-                speed=self.speed_var.get()
-            )
-            
-            url = self.url_var.get().strip()
-            folder = self.folder_var.get().strip()
-            album_title = self.remove_invalid_characters(f"Album_{int(time.time())}")
-            
-            success = self.scraper.grab_links_only(url, folder, album_title, max_media)
-            
-            if success:
-                self.log_message("✅ Link collection mission accomplished! 🔗")
-                messagebox.showinfo("🔗 Links Collected!", f"Links successfully saved to:\n{folder}/{album_title}/media_urls.json\n\nReady for download! 📥")
-            else:
-                self.log_message("❌ Link collection failed. Check the logs for details.")
-                messagebox.showerror("💥 Collection Failed", "Link grabbing failed.\nCheck the activity log for details.")
+            total_albums = len(urls)
+            for i, url in enumerate(urls, 1):
+                if self.is_scraping == False:
+                    self.log_message("⏹️ Link collection stopped by user", "WARNING")
+                    break
                 
+                self.current_album_id = parse_qs(urlparse(url).query).get('set', [''])[0]
+                self.log_message(f"📔 Starting link collection for album {i}/{total_albums}: {url}", "INFO")
+                
+                self.scraper = FacebookAlbumScraper(
+                    headless=self.headless_var.get(),
+                    progress_callback=self.update_progress,
+                    log_callback=self.log_message,
+                    combined_log_callback=self.combined_log_message,
+                    speed=self.speed_var.get()
+                )
+                
+                folder = self.folder_var.get().strip()
+                album_title = self.remove_invalid_characters(f"Album_{self.current_album_id}")
+                
+                success = self.scraper.grab_links_only(url, folder, album_title)
+                
+                if success:
+                    self.log_message(f"✅ Album {i}/{total_albums} links collected successfully! 🔗", "SUCCESS")
+                else:
+                    self.log_message(f"❌ Album {i}/{total_albums} link collection failed. Check logs for details.", "ERROR")
+                
+                self.scraper.close()
+                self.scraper = None
+                
+            if self.is_scraping:
+                self.log_message(f"✅ Multi-album link collection completed! Processed {total_albums} albums.", "SUCCESS")
+                messagebox.showinfo("🔗 Links Collected!", f"Links for {total_albums} albums successfully saved!\n\nReady for download! 📥")
+        
         except Exception as e:
-            self.log_message(f"💥 Unexpected error: {e}")
+            self.log_message(f"💥 Unexpected error: {e}", "ERROR")
             messagebox.showerror("💥 System Error", f"Unexpected error occurred:\n{e}")
         finally:
             if self.scraper:
@@ -1363,28 +1392,30 @@ class FacebookScraperGUI:
                 self.scraper = None
             self.set_scraping_state(False)
     
-    def run_resume_grab_links(self, max_media, json_file_path):
+    def run_resume_grab_links(self, json_file_path):
         try:
             self.scraper = FacebookAlbumScraper(
                 headless=self.headless_var.get(),
                 progress_callback=self.update_progress,
                 log_callback=self.log_message,
+                combined_log_callback=self.combined_log_message,
                 speed=self.speed_var.get()
             )
             
             url = self.url_var.get().strip()
+            self.current_album_id = parse_qs(urlparse(url).query).get('set', [''])[0]
             
-            success = self.scraper.resume_grab_links(url, json_file_path, max_media)
+            success = self.scraper.resume_grab_links(url, json_file_path)
             
             if success:
-                self.log_message("✅ Resume mission accomplished! 🔄")
+                self.log_message("✅ Resume mission accomplished! 🔄", "SUCCESS")
                 messagebox.showinfo("🔄 Resume Complete!", f"Successfully resumed and updated:\n{json_file_path}\n\nContinuation perfected! ⚡")
             else:
-                self.log_message("❌ Resume mission failed. Check the logs for details.")
+                self.log_message("❌ Resume mission failed. Check the logs for details.", "ERROR")
                 messagebox.showerror("💥 Resume Failed", "Resume link grabbing failed.\nCheck the activity log for details.")
                 
         except Exception as e:
-            self.log_message(f"💥 Unexpected error: {e}")
+            self.log_message(f"💥 Unexpected error: {e}", "ERROR")
             messagebox.showerror("💥 System Error", f"Unexpected error occurred:\n{e}")
         finally:
             if self.scraper:
@@ -1392,31 +1423,33 @@ class FacebookScraperGUI:
                 self.scraper = None
             self.set_scraping_state(False)
     
-    def run_download_from_json(self, max_media, json_file_path):
+    def run_download_from_json(self, json_file_path):
         try:
             self.scraper = FacebookAlbumScraper(
                 headless=self.headless_var.get(),
                 progress_callback=self.update_progress,
                 log_callback=self.log_message,
+                combined_log_callback=self.combined_log_message,
                 speed=self.speed_var.get()
             )
             
             folder = self.folder_var.get().strip()
+            self.current_album_id = os.path.basename(os.path.dirname(json_file_path))
             
-            success = self.scraper.download_from_json(json_file_path, folder, max_media)
+            success = self.scraper.download_from_json(json_file_path, folder)
             
             if success:
                 album_title = os.path.basename(os.path.dirname(json_file_path))
                 if not album_title:
                     album_title = f"Album_{int(time.time())}"
-                self.log_message("✅ Download mission accomplished! 📥")
+                self.log_message("✅ Download mission accomplished! 📥", "SUCCESS")
                 messagebox.showinfo("📥 Download Complete!", f"All media successfully downloaded!\n\nSaved to: {folder}/{album_title}\n\nCollection complete! 🎊")
             else:
-                self.log_message("❌ Download mission failed. Check the logs for details.")
+                self.log_message("❌ Download mission failed. Check the logs for details.", "ERROR")
                 messagebox.showerror("💥 Download Failed", "JSON download failed.\nCheck the activity log for details.")
                 
         except Exception as e:
-            self.log_message(f"💥 Unexpected error: {e}")
+            self.log_message(f"💥 Unexpected error: {e}", "ERROR")
             messagebox.showerror("💥 System Error", f"Unexpected error occurred:\n{e}")
         finally:
             if self.scraper:
@@ -1441,30 +1474,23 @@ class FacebookScraperGUI:
                     self.scraper.stop_scraping()
                 self.root.destroy()
         else:
-            # Goodbye animation
             self.title_label.config(text="GOODBYE! 👋", fg="#FF69B4")
             self.root.after(500, self.root.destroy)
 
 def main():
     root = tk.Tk()
     
-    # Set window icon and properties
     try:
-        # Try to set a modern icon if available
-        root.iconbitmap(default="")  # You can add an .ico file path here
+        root.iconbitmap(default="")
     except:
         pass
     
-    # Configure the root window
     root.configure(bg='#0a0a0a')
     
-    # Create the modern GUI
     app = FacebookScraperGUI(root)
     
-    # Set up proper window closing
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
-    # Center the window on screen
     root.update_idletasks()
     width = root.winfo_width()
     height = root.winfo_height()
@@ -1472,7 +1498,6 @@ def main():
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f"{width}x{height}+{x}+{y}")
     
-    # Start the GUI
     root.mainloop()
 
 if __name__ == "__main__":
