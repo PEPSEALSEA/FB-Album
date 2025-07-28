@@ -1,5 +1,5 @@
 """
-Facebook Album Scraper - Multi-Album with Auto Media Count (V1.2)
+Facebook Album Scraper - Multi-Album with Auto Media Count, Persistent Browser, and Fallback Recheck (V1.4)
 WARNING: For educational purposes only.
 Ensure compliance with Facebook's Terms of Service and applicable laws.
 Use Facebook's official API for legitimate use cases.
@@ -37,9 +37,9 @@ class FacebookAlbumScraper:
         self.stop_requested = False
         self.speed = speed
         self.delay_map = {
-            "Slow": {"grab": 1.0, "download": 0.5},
-            "Medium": {"grab": 0.5, "download": 0.3},
-            "Fast": {"grab": 0.2, "download": 0.1}
+            "Slow": {"grab": 1, "download": 0.5, "recheck": 0.5},
+            "Medium": {"grab": 0.6, "download": 0.3, "recheck": 0.3},
+            "Fast": {"grab": 0.2, "download": 0.1, "recheck": 0.2}
         }
         
     def log(self, message, level="INFO"):
@@ -285,6 +285,7 @@ class FacebookAlbumScraper:
         max_stuck_attempts = 5
         stuck_count = 0
         last_url_count = len(media_urls)
+        max_recheck_attempts = 3
         
         self.log(f"Collecting up to {max_media} media URLs (images and videos)...")
         self.update_progress(current_media, max_media, "Collecting media URLs...")
@@ -360,6 +361,72 @@ class FacebookAlbumScraper:
                     break
                 self.driver.refresh()
                 time.sleep(self.delay_map[self.speed]["grab"])
+        
+        # Fallback recheck if collected URLs are less than max_media
+        if len(media_urls) < max_media and not self.stop_requested:
+            self.log(f"Collected {len(media_urls)} URLs, less than expected {max_media}. Initiating fast rewind check...", "WARNING")
+            for attempt in range(max_recheck_attempts):
+                self.log(f"Fast rewind check attempt {attempt + 1}/{max_recheck_attempts}...")
+                try:
+                    # Rewind to first media
+                    if not self.select_first_media(album_url):
+                        self.log("Failed to reselect first media for recheck", "ERROR")
+                        break
+                    
+                    previous_count = len(media_urls)
+                    fast_delay = self.delay_map[self.speed]["grab"] * 0.5  # Faster delay for recheck
+                    
+                    while current_media < max_media and not self.stop_requested:
+                        try:
+                            media_url, media_type, original_url = self.get_media_url()
+                            if media_url and media_url not in [url for url, _, _ in media_urls] and original_url not in [o_url for _, _, o_url in media_urls]:
+                                media_urls.append((media_url, media_type, original_url))
+                                self.log(f"Recheck collected {media_type} URL {len(media_urls)}/{max_media}: {media_url}")
+                                self.update_progress(len(media_urls), max_media, f"Recheck collected {len(media_urls)} URLs")
+                                if url_file_path:
+                                    self.save_urls_to_file(media_urls, url_file_path)
+                            else:
+                                if media_url and original_url in [o_url for _, _, o_url in media_urls]:
+                                    self.log(f"Skipped duplicate media URL: {original_url}", "INFO")
+                            
+                            self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.RIGHT)
+                            time.sleep(fast_delay)
+                            
+                            media_elements = self.driver.find_elements(By.CSS_SELECTOR, "img[data-visualcompletion='media-vc-image'], video[src*='fbcdn'], video[data-sigil='inline-video'], video[src*='video-ak']")
+                            if not media_elements:
+                                self.log("No media elements found during recheck, checking again...", "WARNING")
+                                time.sleep(self.delay_map[self.speed]["grab"])
+                                if not self.driver.find_elements(By.CSS_SELECTOR, "img[data-visualcompletion='media-vc-image'], video[src*='fbcdn'], video[data-sigil='inline-video'], video[src*='video-ak']"):
+                                    self.log("Confirmed end of album during recheck", "INFO")
+                                    break
+                            
+                            current_media += 1
+                            
+                        except Exception as e:
+                            self.log(f"Error during fast rewind check: {e}", "ERROR")
+                            self.log("Suspected crash, waiting before retry...", "WARNING")
+                            time.sleep(self.delay_map[self.speed]["recheck"])
+                            if not self.select_first_media(album_url):
+                                self.log("Failed to recover after crash, stopping recheck", "ERROR")
+                                break
+                    
+                    if len(media_urls) > previous_count:
+                        self.log(f"Recheck added {len(media_urls) - previous_count} new URLs", "INFO")
+                        break
+                    else:
+                        self.log("No new URLs found during recheck, waiting before next attempt...", "WARNING")
+                        time.sleep(self.delay_map[self.speed]["recheck"])
+                        if attempt == max_recheck_attempts - 1:
+                            self.log("No additional media found after all recheck attempts, stopping", "INFO")
+                            break
+                
+                except Exception as e:
+                    self.log(f"Recheck attempt {attempt + 1} failed: {e}", "ERROR")
+                    if attempt < max_recheck_attempts - 1:
+                        self.log("Waiting before next recheck attempt...", "WARNING")
+                        time.sleep(self.delay_map[self.speed]["recheck"])
+                    else:
+                        self.log("Max recheck attempts reached, stopping", "ERROR")
         
         if url_file_path and media_urls:
             self.save_urls_to_file(media_urls, url_file_path)
@@ -445,7 +512,8 @@ class FacebookAlbumScraper:
             self.log(f"Starting to grab links for album: {album_url}")
             self.update_progress(0, 100, "Initializing browser...")
             
-            self.setup_driver()
+            if not self.driver:
+                self.setup_driver()
             if self.stop_requested:
                 return False
             
@@ -479,15 +547,14 @@ class FacebookAlbumScraper:
         except Exception as e:
             self.log(f"Error during link grabbing: {e}", "ERROR")
             return False
-        finally:
-            self.close()
 
     def resume_grab_links(self, album_url, json_file_path, max_media=5000):
         try:
             self.log(f"Resuming link grabbing for album: {album_url}")
             self.update_progress(0, 100, "Initializing browser...")
             
-            self.setup_driver()
+            if not self.driver:
+                self.setup_driver()
             if self.stop_requested:
                 return False
             
@@ -525,8 +592,6 @@ class FacebookAlbumScraper:
         except Exception as e:
             self.log(f"Error during resume link grabbing: {e}", "ERROR")
             return False
-        finally:
-            self.close()
 
     def download_from_json(self, json_file_path, main_folder, max_media=5000):
         try:
@@ -559,16 +624,18 @@ class FacebookAlbumScraper:
             try:
                 self.driver.quit()
                 self.log("Browser closed successfully")
+                self.driver = None
             except Exception as e:
                 self.log(f"Error closing browser: {e}", "ERROR")
-            self.driver = None
+                self.driver = None
 
     def scrape_album(self, album_url, main_folder="downloaded_albums", max_media=5000):
         try:
             self.log(f"Starting scrape of album: {album_url}")
-            self.update_progress(0, 100, "Initializing browser...")
+            self.update_progress(0, 100, "Navigating to album...")
             
-            self.setup_driver()
+            if not self.driver:
+                self.setup_driver()
             if self.stop_requested:
                 return False
             
@@ -611,8 +678,6 @@ class FacebookAlbumScraper:
         except Exception as e:
             self.log(f"Error during scraping: {e}", "ERROR")
             return False
-        finally:
-            self.close()
 
 class ModernButton(tk.Frame):
     def __init__(self, parent, text, command=None, bg_color="#FF1493", hover_color="#FF69B4", text_color="white", **kwargs):
@@ -744,7 +809,7 @@ class AnimatedProgressBar(tk.Frame):
 class FacebookScraperGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("FB Album Scraper - Multi-Album Auto Count Edition")
+        self.root.title("FB Album Scraper - Multi-Album Persistent Browser Edition")
         self.root.geometry("900x700")
         self.root.configure(bg='#0a0a0a')
         self.root.resizable(True, True)
@@ -1306,6 +1371,14 @@ class FacebookScraperGUI:
     def run_multi_scraping(self, urls):
         try:
             total_albums = len(urls)
+            self.scraper = FacebookAlbumScraper(
+                headless=self.headless_var.get(),
+                progress_callback=self.update_progress,
+                log_callback=self.log_message,
+                combined_log_callback=self.combined_log_message,
+                speed=self.speed_var.get()
+            )
+            
             for i, url in enumerate(urls, 1):
                 if self.is_scraping == False:
                     self.log_message("⏹️ Scraping stopped by user", "WARNING")
@@ -1313,14 +1386,6 @@ class FacebookScraperGUI:
                 
                 self.current_album_id = parse_qs(urlparse(url).query).get('set', [''])[0]
                 self.log_message(f"📔 Starting album {i}/{total_albums}: {url}", "INFO")
-                
-                self.scraper = FacebookAlbumScraper(
-                    headless=self.headless_var.get(),
-                    progress_callback=self.update_progress,
-                    log_callback=self.log_message,
-                    combined_log_callback=self.combined_log_message,
-                    speed=self.speed_var.get()
-                )
                 
                 folder = self.folder_var.get().strip()
                 
@@ -1330,9 +1395,6 @@ class FacebookScraperGUI:
                     self.log_message(f"✅ Album {i}/{total_albums} completed successfully! 🎉", "SUCCESS")
                 else:
                     self.log_message(f"❌ Album {i}/{total_albums} failed. Check logs for details.", "ERROR")
-                
-                self.scraper.close()
-                self.scraper = None
                 
             if self.is_scraping:
                 self.log_message(f"✅ Multi-album scraping completed! Processed {total_albums} albums.", "SUCCESS")
@@ -1350,6 +1412,14 @@ class FacebookScraperGUI:
     def run_multi_grab_links(self, urls):
         try:
             total_albums = len(urls)
+            self.scraper = FacebookAlbumScraper(
+                headless=self.headless_var.get(),
+                progress_callback=self.update_progress,
+                log_callback=self.log_message,
+                combined_log_callback=self.combined_log_message,
+                speed=self.speed_var.get()
+            )
+            
             for i, url in enumerate(urls, 1):
                 if self.is_scraping == False:
                     self.log_message("⏹️ Link collection stopped by user", "WARNING")
@@ -1357,14 +1427,6 @@ class FacebookScraperGUI:
                 
                 self.current_album_id = parse_qs(urlparse(url).query).get('set', [''])[0]
                 self.log_message(f"📔 Starting link collection for album {i}/{total_albums}: {url}", "INFO")
-                
-                self.scraper = FacebookAlbumScraper(
-                    headless=self.headless_var.get(),
-                    progress_callback=self.update_progress,
-                    log_callback=self.log_message,
-                    combined_log_callback=self.combined_log_message,
-                    speed=self.speed_var.get()
-                )
                 
                 folder = self.folder_var.get().strip()
                 album_title = self.remove_invalid_characters(f"Album_{self.current_album_id}")
@@ -1375,9 +1437,6 @@ class FacebookScraperGUI:
                     self.log_message(f"✅ Album {i}/{total_albums} links collected successfully! 🔗", "SUCCESS")
                 else:
                     self.log_message(f"❌ Album {i}/{total_albums} link collection failed. Check logs for details.", "ERROR")
-                
-                self.scraper.close()
-                self.scraper = None
                 
             if self.is_scraping:
                 self.log_message(f"✅ Multi-album link collection completed! Processed {total_albums} albums.", "SUCCESS")
